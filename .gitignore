@@ -1,0 +1,37 @@
+﻿# Dependencies
+node_modules/
+backend/vendor/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+backend/__pycache__/
+.venv/
+venv/
+ENV/
+
+# Environment and local configs
+.env
+.env.local
+.env.*.local
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary / Scratch / Cache
+work/
+outputs/
+scratch/
