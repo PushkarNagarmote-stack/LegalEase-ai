@@ -698,7 +698,7 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
   // Chat state
-  const [session, setSession] = useState('demo');
+  const [session, setSession] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([WELCOME]);
   const [text, setText] = useState('');
   const [doc, setDoc] = useState('No document attached');
@@ -712,13 +712,36 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
   const isInitialMount = useRef(true);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Create backend session ─────────────────────────────────────────────────
+  // ── Create backend session (with retry) ────────────────────────────────────
+  /**
+   * Attempts to create a backend session, retrying up to maxAttempts times
+   * with exponential backoff. Resolves with the session_id or null on failure.
+   */
+  const createSession = useCallback(async (maxAttempts = 3): Promise<string | null> => {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const r = await fetch(`${api}/api/session`, { method: 'POST' });
+        const x = await r.json() as { session_id?: string };
+        if (x.session_id) return x.session_id;
+      } catch {
+        if (attempt < maxAttempts) await new Promise(res => setTimeout(res, attempt * 1000));
+      }
+    }
+    return null;
+  }, []);
+
   useEffect(() => {
-    fetch(`${api}/api/session`, { method: 'POST' })
-      .then(r => r.json())
-      .then(x => { if (x.session_id) setSession(x.session_id); })
-      .catch(() => {});
-  }, [activeChatId]); // new backend session for each chat
+    setSession(null); // reset on chat switch
+    createSession().then(sid => { if (sid) setSession(sid); });
+  }, [activeChatId, createSession]); // new backend session for each chat
+
+  /** Ensures a valid session exists, creating one if needed. Returns session id or null. */
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    if (session) return session;
+    const sid = await createSession();
+    if (sid) setSession(sid);
+    return sid;
+  }, [session, createSession]);
 
   // ── Load the active chat from history ──────────────────────────────────────
   useEffect(() => {
@@ -804,14 +827,16 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
     setDoc(f.name);
     setTyping(true);
     try {
+      const sid = await ensureSession();
+      if (!sid) throw new Error('Could not connect to the analysis service. Please try again in a moment.');
       const fd = new FormData();
       fd.append('file', f);
-      const res = await fetch(`${api}/api/session/${session}/document`, { method: 'POST', body: fd });
-      const data = await res.json();
+      const res = await fetch(`${api}/api/session/${sid}/document`, { method: 'POST', body: fd });
+      const data = await res.json() as { message?: string; citations?: Cite[]; suggested_followups?: string[]; flags?: typeof flags; detail?: string };
       if (!res.ok) throw new Error(data.detail || 'Upload failed');
       push({
         role: 'assistant',
-        content: data.message,
+        content: data.message ?? '',
         citations: data.citations,
         followups: data.suggested_followups,
       });
@@ -834,24 +859,28 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
     setText('');
     setTyping(true);
     try {
-      const res = await fetch(`${api}/api/session/${session}/chat`, {
+      const sid = await ensureSession();
+      if (!sid) throw new Error('Could not connect to the analysis service. Please try again in a moment.');
+      const res = await fetch(`${api}/api/session/${sid}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: query, api_key: apiKey || undefined }),
       });
-      const data = await res.json();
+      const data = await res.json() as { answer?: string; citations?: Cite[]; suggested_followups?: string[]; detail?: string };
       if (!res.ok) throw new Error(data.detail || 'Request failed');
-      push({ role: 'assistant', content: data.answer, citations: data.citations, followups: data.suggested_followups });
+      push({ role: 'assistant', content: data.answer ?? '', citations: data.citations, followups: data.suggested_followups });
     } catch (e) {
-      push({ role: 'assistant', content: `Could not reach the analysis service: ${(e as Error).message}. Ensure the FastAPI server is running on port 8001.` });
+      push({ role: 'assistant', content: `Could not reach the analysis service: ${(e as Error).message}` });
     } finally { setTyping(false); }
   }
 
   async function lawyer() {
     setTyping(true);
     try {
-      const res = await fetch(`${api}/api/session/${session}/prepare-for-lawyer`, { method: 'POST' });
-      const data = await res.json();
+      const sid = await ensureSession();
+      if (!sid) throw new Error('no session');
+      const res = await fetch(`${api}/api/session/${sid}/prepare-for-lawyer`, { method: 'POST' });
+      const data = await res.json() as { questions?: string[]; detail?: string };
       if (!res.ok) throw new Error(data.detail || 'Could not generate lawyer questions');
       push({ role: 'assistant', content: 'Questions to Bring to Your Lawyer:', lawyer: data.questions });
     } catch {
