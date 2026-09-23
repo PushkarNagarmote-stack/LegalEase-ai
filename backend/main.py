@@ -839,7 +839,7 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
             if len(full_text) > 10:
                 return full_text
         except Exception as e:
-            raise ValueError(f"PDF extraction error: {e}")
+            raise ValueError(f"PDF extraction error: {e}") from e
 
         raise ValueError("This PDF contains scanned images or non-extractable text. Please copy/paste the text directly or upload a text-based document.")
 
@@ -858,7 +858,7 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
                         paragraphs.append("".join(texts))
                 return "\n\n".join(paragraphs)
         except Exception as e:
-            raise ValueError(f"DOCX extraction failed: {e}")
+            raise ValueError(f"DOCX extraction failed: {e}") from e
 
     ext = os.path.splitext(filename)[1] or "Unknown"
     raise ValueError(
@@ -932,7 +932,7 @@ async def upload_document(session_id: str, request: Request, file: UploadFile = 
     try:
         text = extract_text_from_file(filename, content)
     except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve)) from ve
 
     if not text.strip():
         raise HTTPException(
