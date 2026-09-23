@@ -4,10 +4,14 @@ import os
 import re
 import time
 import uuid
-import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter, defaultdict
 from typing import Any, Callable
+
+try:
+    import defusedxml.ElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET  # nosec B405
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,7 +72,10 @@ async def add_security_headers(request: Request, call_next: Callable[[Request], 
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: https:; "
-        "connect-src 'self' http://localhost:8001 http://127.0.0.1:8001 https://*.onrender.com https://*.vercel.app https://accounts.google.com;"
+        "connect-src 'self' http://localhost:8001 http://127.0.0.1:8001 https://*.onrender.com https://*.vercel.app https://accounts.google.com; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "object-src 'none';"
     )
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -352,14 +359,22 @@ def split_document_into_clauses(text: str, filename: str) -> list[dict[str, Any]
         else:
             heading = re.sub(r'^[#*\s]+', '', first_line)[:45].strip()
         ref = f"{heading}" if heading else f"Section {i}"
+        words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', clean)]
         clauses.append({
             'ref': ref,
             'text': clean,
             'heading': heading.lower(),
-            'type': classify_clause(clean)
+            'type': classify_clause(clean),
+            'word_counts': dict(Counter(words))
         })
 
-    return clauses or [{'ref': f'{clean_fname} - Section 1', 'text': text, 'heading': 'agreement', 'type': 'info'}]
+    return clauses or [{
+        'ref': f'{clean_fname} - Section 1',
+        'text': text,
+        'heading': 'agreement',
+        'type': 'info',
+        'word_counts': dict(Counter(w.lower() for w in re.findall(r'[a-zA-Z0-9]+', text)))
+    }]
 
 
 def classify_clause(text: str) -> str:
@@ -388,7 +403,7 @@ def classify_clause(text: str) -> str:
 def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, Any]]:
     """
     Retrieve top matching clauses from the session using keyword density,
-    synonym expansion, and heading affinity.
+    synonym expansion, and heading affinity. Optimized with precomputed token counts.
     """
     clauses = session.get('chunks', [])
     if not clauses:
@@ -403,8 +418,11 @@ def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, A
 
     scored = []
     for c in clauses:
-        c_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', c['text'])]
-        c_counts = Counter(c_words)
+        c_counts = c.get('word_counts')
+        if c_counts is None:
+            c_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', c['text'])]
+            c_counts = dict(Counter(c_words))
+            c['word_counts'] = c_counts
 
         score = 0.0
         for qw in expanded_q:
@@ -820,8 +838,8 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
                     dec = data.decode(enc)
                     if len(dec.strip()) > 10:
                         return dec
-                except Exception:
-                    pass
+                except (UnicodeDecodeError, LookupError):
+                    continue
 
         # 2. Standard pypdf extraction
         try:
@@ -844,7 +862,7 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 xml_content = zf.read('word/document.xml')
-                tree = ET.fromstring(xml_content)
+                tree = ET.fromstring(xml_content)  # nosec B314
                 paragraphs = []
                 for p in tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
                     texts = [

@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import './styles.css';
 
 // Configure marked for safe inline rendering
@@ -8,14 +9,20 @@ marked.setOptions({ breaks: true, gfm: true });
 
 /**
  * Renders sanitized markdown content into an HTML body container.
+ * Utilizes DOMPurify to prevent XSS vulnerabilities (CWE-79) and React.useMemo
+ * to eliminate redundant parsing on every keystroke or parent state change.
  * @param props Component properties containing the raw markdown string.
  */
 export function MarkdownMessage({ content }: { content: string }) {
-  const html = marked.parse(content || '') as string;
+  const sanitizedHtml = useMemo(() => {
+    const rawHtml = marked.parse(content || '') as string;
+    return DOMPurify.sanitize(rawHtml);
+  }, [content]);
+
   return (
     <div
       className="md-body"
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
     />
   );
 }
@@ -80,14 +87,15 @@ export function Logo() {
  */
 export function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser | null; onSignOut: () => void }) {
   return (
-    <nav className="glass">
+    <nav className="glass" aria-label="Main Navigation">
       <a
         className="brand"
         href="/"
-        onClick={(e) => {
+        onClick={e => {
           e.preventDefault();
           onNavigate('/');
         }}
+        aria-label="LegalEase Home"
       >
         <Logo />
         <span>LegalEase</span>
@@ -101,10 +109,10 @@ export function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string
       {user ? (
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <img src={user.picture} alt={user.name} style={{ width: '32px', height: '32px', borderRadius: '50%', border: '2px solid rgba(201,168,76,0.6)', objectFit: 'cover' }} referrerPolicy='no-referrer' />
-          <button className='primary' onClick={() => onNavigate(user ? '/chat' : '/login')} type='button'>
+          <button className='primary' onClick={() => onNavigate(user ? '/chat' : '/login')} type='button' aria-label="Open Chat interface">
             Open Chat &rarr;
           </button>
-          <button onClick={onSignOut} type='button' style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px', color: 'rgba(255,255,255,0.5)', padding: '8px 14px', cursor: 'pointer', fontSize: '0.82rem', fontFamily: 'inherit' }}>
+          <button onClick={onSignOut} type='button' aria-label="Sign out of your account" style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px', color: 'rgba(255,255,255,0.5)', padding: '8px 14px', cursor: 'pointer', fontSize: '0.82rem', fontFamily: 'inherit' }}>
             Sign out
           </button>
         </div>
@@ -113,6 +121,7 @@ export function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string
           className='primary'
           onClick={() => onNavigate('/login')}
           type='button'
+          aria-label="Sign In with Google"
         >
           Sign In &rarr;
         </button>
@@ -128,6 +137,7 @@ export function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string
 export function Landing({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser | null; onSignOut: () => void }) {
   return (
     <>
+      <a href="#product" className="skip-link">Skip to product overview</a>
       <div className="backdrop" />
       <div className="guide l" />
       <div className="guide r" />
@@ -890,13 +900,14 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
 
   return (
     <>
+      <a href="#chat-main" className="skip-link">Skip to conversation</a>
       <div className="backdrop" />
-      <nav className="glass">
-        <a className="brand" href="/" onClick={e => { e.preventDefault(); onNavigate('/'); }}>
+      <nav className="glass" aria-label="Main Navigation">
+        <a className="brand" href="/" onClick={e => { e.preventDefault(); onNavigate('/'); }} aria-label="LegalEase Home">
           <Logo />
           <span>LegalEase</span>
         </a>
-        <button className="primary" onClick={() => onNavigate('/')} type="button">
+        <button className="primary" onClick={() => onNavigate('/')} type="button" aria-label="Back to home">
           &larr; Home
         </button>
       </nav>
@@ -921,9 +932,9 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
               <h1>Chat with your document.</h1>
               <p>Grounded answers, source citations, and a clear boundary around legal advice.</p>
             </div>
-                      </header>
+          </header>
 
-          <section className="product">
+          <section className="product" aria-label="Interactive legal assistant workspace">
             <div className="window glass">
               <div className="topbar">
                 <i /><i /><i />
@@ -931,8 +942,8 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
               </div>
 
               <div className="workspace">
-                <aside>
-                  <button className="new" onClick={() => fileInputRef.current?.click()} type="button">
+                <aside aria-label="Document tools and clause flags">
+                  <button className="new" onClick={() => fileInputRef.current?.click()} type="button" aria-label="Upload legal document file">
                     &#128196;&nbsp; Upload Document
                   </button>
 
@@ -941,6 +952,7 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                     style={{ marginTop: '8px', padding: '6px 10px', background: 'rgba(61,129,227,0.15)', borderRadius: '6px', color: '#a4f4fd', border: '1px solid rgba(61,129,227,0.3)' }}
                     onClick={loadSampleLease}
                     type="button"
+                    aria-label="Load residential sample lease agreement"
                   >
                     &rarr; Load Sample Lease
                   </button>
@@ -959,12 +971,14 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                   <label style={{ marginTop: '24px' }}>AI ENGINE</label>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '4px' }}>
                     <input
+                      id="gemini-key-input"
                       type="password"
                       placeholder="Gemini API key (optional)"
                       value={apiKey}
                       onChange={e => { setApiKey(e.target.value); localStorage.setItem('legalease_api_key', e.target.value); }}
                       style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '6px', color: '#ffffff', padding: '7px 10px', fontSize: '11px', width: '100%', boxSizing: 'border-box', outline: 'none' }}
                       title="Enter your Gemini API key to enable full AI responses via the Gemini model"
+                      aria-label="Gemini API key (optional)"
                     />
                     <small style={{ color: 'rgba(255,255,255,0.35)', fontSize: '10px', lineHeight: '1.4' }}>
                       {apiKey ? '🔑 Gemini AI enabled' : 'Smart clause QA active'}
@@ -972,15 +986,15 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                   </div>
                 </aside>
 
-                <section className="chat">
-                  <div className="thread" ref={threadRef}>
+                <section className="chat" id="chat-main" aria-label="Legal conversation panel">
+                  <div className="thread" id="chat-thread" ref={threadRef} role="log" aria-live="polite" aria-atomic="false" aria-label="Conversation message history">
                     {messages.map((m) => (
                       <article className={'message ' + m.role} key={m.id ?? m.content.slice(0, 40) + m.role}>
                         <div className="bubble">
                           {m.lawyer ? (
                             <>
                               <h3>{m.content}</h3>
-                              <ol>{m.lawyer.map((q) => <li key={q} style={{ marginTop: '6px' }}>{q}</li>)}</ol>
+                              <ol aria-label="Questions to bring to your lawyer">{m.lawyer.map((q) => <li key={q} style={{ marginTop: '6px' }}>{q}</li>)}</ol>
                               <button
                                 type="button"
                                 style={{
@@ -1003,6 +1017,7 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                                   }
                                 }}
                                 title="Copy all questions to clipboard"
+                                aria-label="Copy all lawyer questions to clipboard"
                               >
                                 📋 Copy Questions
                               </button>
@@ -1011,9 +1026,9 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                             <div className="md-wrap">
                               <MarkdownMessage content={m.content} />
                               {m.citations && m.citations.length > 0 && (
-                                <div className="sources-tray">
+                                <div className="sources-tray" aria-label="Referenced clauses">
                                   <div className="sources-tray-label">
-                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                                       <polyline points="14 2 14 8 20 8"></polyline>
                                     </svg>
@@ -1045,10 +1060,10 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                           )}
 
                           {open && m.citations?.some(c => c.clause_ref === open.clause_ref) && (
-                            <div className="source-viewer">
+                            <div className="source-viewer" role="region" aria-label="Referenced contract clause snippet">
                               <div className="source-viewer-header">
                                 <b>{open.clause_ref}</b>
-                                <button onClick={() => setOpen(null)} className="close-source" type="button" title="Close snippet">&times;</button>
+                                <button onClick={() => setOpen(null)} className="close-source" type="button" title="Close snippet" aria-label="Close citation snippet">&times;</button>
                               </div>
                               <q>&ldquo;{open.source_text}&rdquo;</q>
                             </div>
@@ -1056,9 +1071,9 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                         </div>
 
                         {m.followups && m.followups.length > 0 && (
-                          <div className="followups">
+                          <div className="followups" aria-label="Suggested follow-up questions">
                             {m.followups.map(q => (
-                              <button onClick={() => send(q)} key={q} type="button">{q}</button>
+                              <button onClick={() => send(q)} key={q} type="button" aria-label={`Ask: ${q}`}>{q}</button>
                             ))}
                           </div>
                         )}
@@ -1066,7 +1081,7 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                     ))}
 
                     {typing && (
-                      <div className="typing"><i /><i /><i /> LegalEase is writing&hellip;</div>
+                      <div className="typing" role="status" aria-live="polite" aria-label="LegalEase AI is generating response"><i /><i /><i /> LegalEase is writing&hellip;</div>
                     )}
                   </div>
 
