@@ -1,24 +1,193 @@
-﻿from collections import Counter
+import html
+import io
 import os
 import re
-import sys
+import time
+import uuid
+import xml.etree.ElementTree as ET
+import zipfile
+from collections import Counter, defaultdict
 from typing import Any
-from fastapi import FastAPI, HTTPException, UploadFile, File
+
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Application Initialization & Security Configuration
+# ─────────────────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="LegalEase AI Backend", version="1.0.0")
+app = FastAPI(
+    title="LegalEase AI Backend",
+    version="1.0.0",
+    description="Conversational GenAI legal-document assistant with grounded clause citations."
+)
+
+# 1. CORS Hardening: Restrict to explicit frontend origins (never wildcard + credentials)
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+if os.environ.get("ALLOWED_ORIGINS"):
+    for o in os.environ["ALLOWED_ORIGINS"].split(","):
+        if o.strip() and o.strip() not in ALLOWED_ORIGINS:
+            ALLOWED_ORIGINS.append(o.strip())
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
+
+# 2. Security Headers Middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """
+    Inject comprehensive defense-in-depth security headers on all responses:
+    - X-Content-Type-Options: Prevents MIME-type sniffing
+    - X-Frame-Options: Prevents clickjacking
+    - Referrer-Policy: Protects referrer leakage
+    - Permissions-Policy: Disables unused browser hardware APIs
+    - Content-Security-Policy: Controls resource loading origins
+    - Strict-Transport-Security: Enforces HTTPS when accessed over TLS
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://accounts.google.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
+        "img-src 'self' data: https:; "
+        "connect-src 'self' http://localhost:8001 http://127.0.0.1:8001 https://accounts.google.com;"
+    )
+    if request.url.scheme == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+# 3. CSRF & Origin Verification Middleware
+@app.middleware("http")
+async def verify_csrf_and_origin(request: Request, call_next):
+    """
+    Verify Origin and Referer headers on state-changing HTTP methods
+    (POST, PUT, DELETE) when dispatched from browser environments.
+    """
+    if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        origin = request.headers.get("origin")
+        referer = request.headers.get("referer")
+
+        if origin and origin not in ALLOWED_ORIGINS:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": f"Cross-Origin request blocked. Origin '{origin}' is not authorized."}
+            )
+        if referer and not any(referer.startswith(allowed) for allowed in ALLOWED_ORIGINS):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "Request blocked: Referer is not from an authorized origin."}
+            )
+
+    return await call_next(request)
+
+
+# 4. In-Memory Sliding-Window Rate Limiting
+RATE_LIMITS = {
+    "chat": {"window": 60.0, "max_requests": 30},     # 30 chat messages / min
+    "upload": {"window": 60.0, "max_requests": 10},   # 10 document uploads / min
+    "session": {"window": 60.0, "max_requests": 60},  # 60 session creations / min
+}
+
+_rate_limit_records: dict[str, list[float]] = defaultdict(list)
+
+
+def check_rate_limit(client_id: str, action: str):
+    """
+    Enforce a sliding-window rate limit for a client identifier and action.
+    Raises HTTPException(429) with Retry-After header when rate exceeded.
+    """
+    now = time.time()
+    cfg = RATE_LIMITS.get(action, {"window": 60.0, "max_requests": 60})
+    window = cfg["window"]
+    max_reqs = cfg["max_requests"]
+
+    key = f"{action}:{client_id}"
+    history = _rate_limit_records[key]
+    # Prune timestamps outside current window
+    _rate_limit_records[key] = [t for t in history if now - t < window]
+
+    if len(_rate_limit_records[key]) >= max_reqs:
+        oldest = _rate_limit_records[key][0]
+        retry_after = max(1, int(window - (now - oldest)))
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded for {action}. Please try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)}
+        )
+
+    _rate_limit_records[key].append(now)
+
+
+# 5. Session Management with TTL & Capacity Eviction (Efficiency & Stability)
+SESSION_TTL_SECONDS = 7200  # 2 hours
+MAX_SESSIONS = 500
+MAX_UPLOAD_SIZE = 15 * 1024 * 1024  # 15 MB
+
 sessions: dict[str, dict[str, Any]] = {}
+
+
+def evict_expired_sessions(current_time: float) -> None:
+    """
+    Remove sessions that have exceeded the TTL window to avoid unbounded memory leaks.
+    """
+    expired = [
+        sid for sid, data in sessions.items()
+        if current_time - data.get("last_accessed", data.get("created_at", 0)) > SESSION_TTL_SECONDS
+    ]
+    for sid in expired:
+        sessions.pop(sid, None)
+
+
+def get_or_create_session(session_id: str) -> dict[str, Any]:
+    """
+    Retrieve an active session or initialize a new one with timestamp tracking.
+    Enforces maximum capacity cap with LRU eviction.
+    """
+    now = time.time()
+    evict_expired_sessions(now)
+
+    if session_id in sessions:
+        sessions[session_id]["last_accessed"] = now
+        return sessions[session_id]
+
+    # Enforce capacity cap
+    if len(sessions) >= MAX_SESSIONS:
+        oldest_sid = min(sessions.keys(), key=lambda k: sessions[k].get("last_accessed", 0))
+        sessions.pop(oldest_sid, None)
+
+    new_session = {
+        "chunks": [],
+        "history": [],
+        "file_names": [],
+        "created_at": now,
+        "last_accessed": now
+    }
+    sessions[session_id] = new_session
+    return new_session
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Linguistic Data & Knowledge Base
+# ─────────────────────────────────────────────────────────────────────────────
 
 STOP_WORDS = {
     'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', 'aren\'t', 'as', 'at',
@@ -51,42 +220,116 @@ SYNONYMS = {
 LEGAL_KNOWLEDGE_BASE = {
     'indemn': {
         'topic': 'Indemnification Clauses',
-        'content': 'An **indemnification clause** is a risk-shifting provision where one party agrees to compensate (or "hold harmless") the other for certain damages, legal liabilities, or lawsuits arising from the contract.\n\n- **In Leases**: Landlords frequently include this so tenants cover claims if a guest slips or property is damaged due to tenant negligence.\n- **Negotiation Tip**: Ensure indemnification is **mutual** and explicitly excludes the other party\'s gross negligence or willful misconduct.',
-        'followups': ['What is the difference between indemnify and hold harmless?', 'How can I limit my liability in a contract?']
+        'content': (
+            'An **indemnification clause** is a risk-shifting provision where one party agrees to '
+            'compensate (or "hold harmless") the other for certain damages, legal liabilities, or lawsuits '
+            'arising from the contract.\n\n'
+            '- **In Leases**: Landlords frequently include this so tenants cover claims if a guest slips '
+            'or property is damaged due to tenant negligence.\n'
+            '- **Negotiation Tip**: Ensure indemnification is **mutual** and explicitly excludes the other '
+            'party\'s gross negligence or willful misconduct.'
+        ),
+        'followups': [
+            'What is the difference between indemnify and hold harmless?',
+            'How can I limit my liability in a contract?'
+        ]
     },
     'force majeure': {
         'topic': 'Force Majeure ("Act of God")',
-        'content': 'A **force majeure clause** excuses contractual obligations when extraordinary, unforeseeable events beyond the parties\' control occurâ€”such as natural disasters, wars, or government lockdowns.\n\n- **Key Rule**: Courts interpret force majeure strictly. If an event is not specifically listed in the clause, it may not be excused.\n- **Important**: In residential leases, force majeure rarely excuses rent payment unless the premises become completely uninhabitable.',
-        'followups': ['Does force majeure excuse rent during emergencies?', 'What makes a valid force majeure event?']
+        'content': (
+            'A **force majeure clause** excuses contractual obligations when extraordinary, unforeseeable '
+            'events beyond the parties\' control occur—such as natural disasters, wars, or government lockdowns.\n\n'
+            '- **Key Rule**: Courts interpret force majeure strictly. If an event is not specifically listed '
+            'in the clause, it may not be excused.\n'
+            '- **Important**: In residential leases, force majeure rarely excuses rent payment unless the '
+            'premises become completely uninhabitable.'
+        ),
+        'followups': [
+            'Does force majeure excuse rent during emergencies?',
+            'What makes a valid force majeure event?'
+        ]
     },
     'severab': {
         'topic': 'Severability Provisions',
-        'content': 'A **severability clause** states that if any single term or clause in the contract is found unlawful or unenforceable by a court, the remainder of the agreement stays legally binding and in effect.\n\n- **Purpose**: It prevents the entire contract from collapsing just because one aggressive term violated local statutory law.',
-        'followups': ['What happens if a contract doesn\'t have severability?', 'Can an illegal clause void a whole contract?']
+        'content': (
+            'A **severability clause** states that if any single term or clause in the contract is found '
+            'unlawful or unenforceable by a court, the remainder of the agreement stays legally binding and in effect.\n\n'
+            '- **Purpose**: It prevents the entire contract from collapsing just because one aggressive term '
+            'violated local statutory law.'
+        ),
+        'followups': [
+            'What happens if a contract doesn\'t have severability?',
+            'Can an illegal clause void a whole contract?'
+        ]
     },
     'arbitrat': {
         'topic': 'Arbitration & Dispute Resolution',
-        'content': 'An **arbitration clause** requires parties to resolve legal disputes outside of court before a neutral private arbitrator rather than through a public judge and jury.\n\n- **Pros**: Faster, private, and confidential.\n- **Cons**: Often limits discovery rights, eliminates jury trials, and generally cannot be appealed.\n- **Look For**: Whether arbitration is mandatory or optional, and whether you retain the right to resolve issues in small claims court.',
-        'followups': ['Can I opt out of an arbitration clause?', 'Is arbitration better or worse for tenants?']
+        'content': (
+            'An **arbitration clause** requires parties to resolve legal disputes outside of court before '
+            'a neutral private arbitrator rather than through a public judge and jury.\n\n'
+            '- **Pros**: Faster, private, and confidential.\n'
+            '- **Cons**: Often limits discovery rights, eliminates jury trials, and generally cannot be appealed.\n'
+            '- **Look For**: Whether arbitration is mandatory or optional, and whether you retain the right '
+            'to resolve issues in small claims court.'
+        ),
+        'followups': [
+            'Can I opt out of an arbitration clause?',
+            'Is arbitration better or worse for tenants?'
+        ]
     },
     'liquidat': {
         'topic': 'Liquidated Damages',
-        'content': 'A **liquidated damages clause** specifies a pre-agreed financial penalty that one party must pay if they breach the contract (e.g. breaking a lease early or late performance).\n\n- **Legal Standard**: To be enforceable, the amount must be a reasonable estimate of anticipated damages at the time of signing, not a punitive penalty.\n- **If Unreasonable**: Courts will strike down excessive liquidated damages as unenforceable penalties.',
-        'followups': ['How can I challenge an excessive fee or penalty?', 'What makes liquidated damages enforceable?']
+        'content': (
+            'A **liquidated damages clause** specifies a pre-agreed financial penalty that one party must '
+            'pay if they breach the contract (e.g. breaking a lease early or late performance).\n\n'
+            '- **Legal Standard**: To be enforceable, the amount must be a reasonable estimate of anticipated '
+            'damages at the time of signing, not a punitive penalty.\n'
+            '- **If Unreasonable**: Courts will strike down excessive liquidated damages as unenforceable penalties.'
+        ),
+        'followups': [
+            'How can I challenge an excessive fee or penalty?',
+            'What makes liquidated damages enforceable?'
+        ]
     },
     'quiet enjoy': {
         'topic': 'Covenant of Quiet Enjoyment',
-        'content': 'The **implied covenant of quiet enjoyment** guarantees that a tenant can live in the property peacefully without substantial interference, harassment, or unlawful entry from the landlord.\n\n- **Examples of Breach**: Unannounced landlord entries, chronic unaddressed noise or harassment, or failing to fix uninhabitable conditions.',
-        'followups': ['Can a landlord enter my apartment without notice?', 'What should I do if a landlord violates quiet enjoyment?']
+        'content': (
+            'The **implied covenant of quiet enjoyment** guarantees that a tenant can live in the property '
+            'peacefully without substantial interference, harassment, or unlawful entry from the landlord.\n\n'
+            '- **Examples of Breach**: Unannounced landlord entries, chronic unaddressed noise or harassment, '
+            'or failing to fix uninhabitable conditions.'
+        ),
+        'followups': [
+            'Can a landlord enter my apartment without notice?',
+            'What should I do if a landlord violates quiet enjoyment?'
+        ]
     },
     'habitab': {
         'topic': 'Warranty of Habitability',
-        'content': 'The **implied warranty of habitability** requires residential landlords to provide living conditions that are safe, clean, and fit for human habitation, regardless of what the lease says.\n\n- **Standard Requirements**: Working plumbing, hot/cold running water, effective heating/weatherproofing, sanitary conditions, and smoke/CO alarms.\n- **Legal Protections**: Leases cannot waive or contract away habitability protections in most jurisdictions.',
-        'followups': ['Can I withhold rent for broken heat or hot water?', 'What is repair and deduct?']
+        'content': (
+            'The **implied warranty of habitability** requires residential landlords to provide living conditions '
+            'that are safe, clean, and fit for human habitation, regardless of what the lease says.\n\n'
+            '- **Standard Requirements**: Working plumbing, hot/cold running water, effective heating/weatherproofing, '
+            'sanitary conditions, and smoke/CO alarms.\n'
+            '- **Legal Protections**: Leases cannot waive or contract away habitability protections in most jurisdictions.'
+        ),
+        'followups': [
+            'Can I withhold rent for broken heat or hot water?',
+            'What is repair and deduct?'
+        ]
     },
 }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Clause Splitting, Classification & Grounded Retrieval
+# ─────────────────────────────────────────────────────────────────────────────
+
 def split_document_into_clauses(text: str, filename: str) -> list[dict[str, Any]]:
+    """
+    Split legal agreement text into modular clauses and classify each by type.
+    Detects section markers, articles, numeric clauses, and double line breaks.
+    """
     clean_fname = os.path.basename(filename)
     section_pattern = r'\n(?=(?:[0-9]{1,2}\.|\bSection\b|\bArticle\b|\bClause\b)\s+[A-Za-z0-9])'
     parts = re.split(section_pattern, text)
@@ -99,7 +342,11 @@ def split_document_into_clauses(text: str, filename: str) -> list[dict[str, Any]
         if len(clean) < 15:
             continue
         first_line = clean.split('\n')[0].strip()
-        m_head = re.match(r'^((?:Section|Article|Clause|[0-9]{1,2}\.)\s*[^.\n:;]+(?:[:.][^.\n:;]+)?)', first_line, re.IGNORECASE)
+        m_head = re.match(
+            r'^((?:Section|Article|Clause|[0-9]{1,2}\.)\s*[^.\n:;]+(?:[:.][^.\n:;]+)?)',
+            first_line,
+            re.IGNORECASE
+        )
         if m_head:
             heading = m_head.group(1).strip()
         else:
@@ -111,19 +358,38 @@ def split_document_into_clauses(text: str, filename: str) -> list[dict[str, Any]
             'heading': heading.lower(),
             'type': classify_clause(clean)
         })
+
     return clauses or [{'ref': f'{clean_fname} - Section 1', 'text': text, 'heading': 'agreement', 'type': 'info'}]
 
+
 def classify_clause(text: str) -> str:
+    """
+    Classify a clause text into risk, obligation, right, or info based on legal linguistic cues.
+    """
     t = text.lower()
-    if any(x in t for x in ('terminate', 'penalty', 'fee', 'forfeit', 'liable', 'default', 'breach', 'damages', 'indemnify', 'late fee')):
+    if any(x in t for x in (
+        'terminate', 'penalty', 'fee', 'forfeit', 'liable', 'default',
+        'breach', 'damages', 'indemnify', 'late fee', 'indemnification'
+    )):
         return 'risk'
-    if any(x in t for x in ('must', 'shall', 'required', 'notice', 'responsible', 'obligation', 'covenant', 'pay', 'notify')):
-        return 'obligation'
-    if any(x in t for x in ('right', 'may request', 'entitled', 'landlord shall', 'tenant may', 'permitted', 'option', 'refund')):
+    if any(x in t for x in (
+        'right', 'may request', 'entitled', 'landlord shall', 'tenant may',
+        'permitted', 'option', 'refund'
+    )):
         return 'right'
+    if any(x in t for x in (
+        'must', 'shall', 'required', 'notice', 'responsible', 'obligation',
+        'covenant', 'pay', 'notify'
+    )):
+        return 'obligation'
     return 'info'
 
+
 def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, Any]]:
+    """
+    Retrieve top matching clauses from the session using keyword density,
+    synonym expansion, and heading affinity.
+    """
     clauses = session.get('chunks', [])
     if not clauses:
         return []
@@ -153,16 +419,37 @@ def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, A
     top_matches = [x[1] for x in scored if x[0] > 0]
     return top_matches[:3]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GenAI / Gemini 2.5 Integration with Client Instance Caching
+# ─────────────────────────────────────────────────────────────────────────────
+
+_GENAI_CLIENTS: dict[str, Any] = {}
+
+
+def get_genai_client(api_key: str):
+    """
+    Retrieve or cache a Google GenAI Client instance to avoid redundant initialization.
+    """
+    if api_key not in _GENAI_CLIENTS:
+        from google import genai
+        _GENAI_CLIENTS[api_key] = genai.Client(api_key=api_key)
+    return _GENAI_CLIENTS[api_key]
+
+
 def try_gemini_llm(message: str, session: dict[str, Any], api_key: str | None) -> dict[str, Any] | None:
+    """
+    Attempt to invoke Gemini 2.5-flash with document grounding and plain-language formatting.
+    Falls back gracefully to deterministic keyword-density retrieval if key is missing or call fails.
+    """
     key = api_key or os.environ.get("GEMINI_API_KEY")
     if not key:
         return None
 
     try:
-        from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=key)
+        client = get_genai_client(key)
 
         doc_context = ""
         chunks = session.get('chunks', [])
@@ -196,20 +483,39 @@ def try_gemini_llm(message: str, session: dict[str, Any], api_key: str | None) -
             return {
                 'answer': clean_answer,
                 'citations': [{'clause_ref': c['ref'], 'source_text': c['text'][:700]} for c in chunks[:3]],
-                'suggested_followups': ['What are my biggest legal risks?', 'What should I negotiate?', 'What questions should I ask an attorney?']
+                'suggested_followups': [
+                    'What are my biggest legal risks?',
+                    'What should I negotiate?',
+                    'What questions should I ask an attorney?'
+                ]
             }
     except Exception as e:
-        print(f"Gemini call fallback: {e}")
+        # Avoid logging raw user keys or confidential document contents
+        print(f"Gemini call fallback: {e.__class__.__name__}")
         return None
+
     return None
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deterministic Grounded Legal QA & Conversational Engine
+# ─────────────────────────────────────────────────────────────────────────────
+
 def generate_conversational_response(question: str, session: dict[str, Any]) -> dict[str, Any]:
+    """
+    Generate grounded responses across greetings, document overview, legal literacy,
+    contract validity, and clause-level question answering.
+    """
     q_lower = question.lower().strip()
 
     # 1. Greetings
     if any(q_lower.startswith(g) for g in ('hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening')):
         has_doc = bool(session.get('chunks'))
-        doc_note = f"I see you have **{session.get('file_names', ['your document'])[-1]}** loaded." if has_doc else "You can upload a contract or lease anytime using the **Upload Document** button on the left."
+        doc_note = (
+            f"I see you have **{session.get('file_names', ['your document'])[-1]}** loaded."
+            if has_doc
+            else "You can upload a contract or lease anytime using the **Upload Document** button on the left."
+        )
         return {
             'answer': (
                 "Hello! I am **LegalEase AI**, your conversational legal document and literacy assistant.\n\n"
@@ -230,15 +536,23 @@ def generate_conversational_response(question: str, session: dict[str, Any]) -> 
         }
 
     # 2. How it works / Self-introduction
-    if any(k in q_lower for k in ('how you work', 'how do you work', 'how does this work', 'how does it work', 'what do you do', 'what can you do', 'who are you', 'tell me about yourself', 'how it works', 'explain yourself')):
+    if any(k in q_lower for k in (
+        'how you work', 'how do you work', 'how does this work', 'how does it work',
+        'what do you do', 'what can you do', 'who are you', 'tell me about yourself',
+        'how it works', 'explain yourself'
+    )):
         has_doc = bool(session.get('chunks'))
-        doc_status = f"You currently have **{session.get('file_names', ['your document'])[-1]}** active." if has_doc else "You haven't uploaded a document yet."
+        doc_status = (
+            f"You currently have **{session.get('file_names', ['your document'])[-1]}** active."
+            if has_doc
+            else "You haven't uploaded a document yet."
+        )
         return {
             'answer': (
                 "### How LegalEase AI Works\n\n"
                 "LegalEase AI is built to give everyday individuals and small business owners the clarity they need when facing complex legal contracts.\n\n"
                 "**1. Document Ingestion & Clause Detection**\n"
-                "When you upload a document (PDF, DOCX, TXT), I parse the document into individual sections and categorize them into **Risks** (penalties, liabilities), **Obligations** (duties, payments), and **Rights** (tenant/client entitlements).\n\n"
+                "When you upload a document (PDF, DOCX, TXT, MD), I parse the document into individual sections and categorize them into **Risks** (penalties, liabilities), **Obligations** (duties, payments), and **Rights** (tenant/client entitlements).\n\n"
                 "**2. Plain-Language Q&A**\n"
                 "You can ask natural questions like *'When is rent considered late?'*, *'Can the landlord enter without notice?'*, or *'What happens if I terminate early?'* without using legal jargon.\n\n"
                 "**3. Direct Source Grounding**\n"
@@ -262,7 +576,7 @@ def generate_conversational_response(question: str, session: dict[str, Any]) -> 
             return {
                 'answer': (
                     "No document is currently loaded. To get a comprehensive summary and breakdown, "
-                    "please upload a file (PDF, DOCX, or TXT) using the **Upload Document** button, "
+                    "please upload a file (PDF, DOCX, TXT, or MD) using the **Upload Document** button, "
                     "or click **Load Sample Lease** to try an example agreement."
                 ),
                 'citations': [],
@@ -298,25 +612,24 @@ def generate_conversational_response(question: str, session: dict[str, Any]) -> 
                 "- **Termination & Early Exit**: Look for early cancellation fees, liquidated damages, or subletting restrictions.\n"
                 "- **Maintenance & Repairs**: Ensure the other party is explicitly responsible for major structural and essential utility repairs.\n"
                 "- **Dispute Resolution**: Watch out for mandatory arbitration clauses or waivers of jury trial rights.\n\n"
-                "*Golden Rule: Never rely on verbal assurances. If something was promised verbally, insist it is written into the agreement.*"
+                "*Tip: You can upload your agreement directly and I will locate each of these clauses for you!*"
             ),
             'citations': [],
             'suggested_followups': [
-                'How can I negotiate terms before signing?',
-                'What makes a contract legally binding?',
-                'What is a liquidated damages clause?'
+                'What is an indemnification clause?',
+                'Can I opt out of an arbitration clause?',
+                'What makes a contract legally binding?'
             ]
         }
 
-    # 5. Contract Negotiation Strategies
-    if any(k in q_lower for k in ('negotiat', 'how to negotiate', 'bargain')):
+    # 5. Negotiation Strategies
+    if any(k in q_lower for k in ('negotiat', 'how to ask for changes', 'counter offer', 'bargain', 'amend')):
         return {
             'answer': (
-                "### Practical Contract Negotiation Strategies\n\n"
-                "Most agreements and residential leases are negotiable before signing. Here are effective strategies:\n\n"
-                "1. **Identify Unbalanced Clauses**: Look for one-sided indemnification, aggressive penalties, or vague repair timelines.\n"
-                "2. **Propose Mutual Wording**: If a clause states you must indemnify the other party, request that the indemnification be **mutual**.\n"
-                "3. **Replace Ambiguity with Specifics**: If a clause says *'reasonable notice'*, ask for an explicit timeframe like *'at least 24 hours written notice'*.\n"
+                "### Contract Negotiation Best Practices\n\n"
+                "1. **Never Assume Terms Are Fixed**: Almost every contractual provision is open to discussion before signatures are affixed.\n"
+                "2. **Ask for Mutuality**: If the agreement has an indemnification or attorney-fee clause, ask that it protect both parties equally.\n"
+                "3. **Cap Financial Exposure**: Request an express ceiling on liability, late fees, or uncapped indemnity.\n"
                 "4. **Leverage Your Strengths**: Strong credit, timely payments, or agreeing to a longer term can be traded for concessions like lower deposits or waived fees.\n"
                 "5. **Use Written Addenda**: If changes are agreed upon, initial the edits directly on the contract or attach a signed addendum."
             ),
@@ -373,9 +686,10 @@ def generate_conversational_response(question: str, session: dict[str, Any]) -> 
             return {'answer': answer, 'citations': citations, 'suggested_followups': followups}
 
     # 9. Natural conversational fallback
+    safe_q = html.escape(question)
     return {
         'answer': (
-            f"Here is a plain-language legal perspective regarding **{question}**:\n\n"
+            f"Here is a plain-language legal perspective regarding **{safe_q}**:\n\n"
             "In contract law and legal agreements, this subject typically governs how responsibilities, risks, and remedies are allocated between parties.\n\n"
             "**Key Considerations**:\n"
             "- **Balance of Obligations**: Check whether the requirement applies mutually or places unilateral risk on one party.\n"
@@ -391,7 +705,12 @@ def generate_conversational_response(question: str, session: dict[str, Any]) -> 
         ]
     }
 
+
 def generate_grounded_answer(clause: dict[str, Any], question: str, other_clauses: list[dict[str, Any]]) -> str:
+    """
+    Synthesize a document-grounded answer anchored directly to an identified clause,
+    extracting specific amounts, timeframes, and penalties.
+    """
     ref = clause['ref']
     text = clause['text']
     clause_type = clause['type'].capitalize()
@@ -403,7 +722,9 @@ def generate_grounded_answer(clause: dict[str, Any], question: str, other_clause
     for s in sentences:
         s_lower = s.lower()
         match_count = sum(1 for w in q_words if w in s_lower)
-        has_data = any(ch in s for ch in ('$', '%')) or any(w in s_lower for w in ('day', 'days', 'month', 'shall', 'must', 'due', 'pay', 'notice', 'fee', 'deposit', 'repair', 'terminate'))
+        has_data = any(ch in s for ch in ('$', '%')) or any(
+            w in s_lower for w in ('day', 'days', 'month', 'shall', 'must', 'due', 'pay', 'notice', 'fee', 'deposit', 'repair', 'terminate')
+        )
         score = match_count * 2 + (1.5 if has_data else 0)
         ranked_sentences.append((score, s))
 
@@ -435,23 +756,52 @@ def generate_grounded_answer(clause: dict[str, Any], question: str, other_clause
         answer_parts.append("\n**Summary**: This clause establishes the binding expectations and contractual terms on this subject.")
 
     answer_parts.append("\n\n*Note: This is document-grounded legal information, not formal legal advice. Consult an attorney for jurisdiction-specific rights.*")
-    
+
     raw_answer = "\n".join(answer_parts)
     return re.sub(r'\[\d+\]', '', raw_answer).strip()
 
+
 def build_followups(clause: dict[str, Any], question: str) -> list[str]:
+    """
+    Construct contextual suggested follow-up questions tailored to clause subject matter.
+    """
     combined = (clause['text'] + ' ' + question).lower()
     if 'rent' in combined or 'fee' in combined:
-        return ['When is rent legally considered late?', 'What happens if a late fee is disputed?', 'Can the landlord raise the rent during the term?']
+        return [
+            'When is rent legally considered late?',
+            'What happens if a late fee is disputed?',
+            'Can the landlord raise the rent during the term?'
+        ]
     if 'deposit' in combined:
-        return ['What counts as ordinary wear and tear?', 'What deductions are permitted from the deposit?', 'How do I document condition at move-in?']
+        return [
+            'What counts as ordinary wear and tear?',
+            'What deductions are permitted from the deposit?',
+            'How do I document condition at move-in?'
+        ]
     if 'notice' in combined or 'vacate' in combined or 'terminate' in combined:
-        return ['Can this notice period be negotiated?', 'What happens if I need to leave before the lease ends?', 'Must notice be delivered by certified mail?']
+        return [
+            'Can this notice period be negotiated?',
+            'What happens if I need to leave before the lease ends?',
+            'Must notice be delivered by certified mail?'
+        ]
     if 'repair' in combined or 'maintenance' in combined:
-        return ['What repairs is the landlord strictly required to make?', 'Can I deduct repair costs from rent?', 'What is an acceptable timeline for repairs?']
-    return ['What are my main obligations under this clause?', 'Does this term pose any unexpected liabilities?', 'What specific questions should I ask an attorney?']
+        return [
+            'What repairs is the landlord strictly required to make?',
+            'Can I deduct repair costs from rent?',
+            'What is an acceptable timeline for repairs?'
+        ]
+    return [
+        'What are my main obligations under this clause?',
+        'Does this term pose any unexpected liabilities?',
+        'What specific questions should I ask an attorney?'
+    ]
+
 
 def extract_text_from_file(filename: str, data: bytes) -> str:
+    """
+    Safely extract plain text from supported document formats (.pdf, .docx, .txt, .md).
+    Raises ValueError with descriptive feedback for unsupported formats or extraction errors.
+    """
     name = filename.lower()
 
     if name.endswith('.txt') or name.endswith('.md'):
@@ -463,7 +813,7 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
         return data.decode('utf-8', errors='ignore')
 
     if name.endswith('.pdf'):
-        # 1. If not starting with %PDF, treat as plaintext/markdown saved with .pdf
+        # 1. Plaintext fallback if saved with .pdf extension
         if not data.startswith(b'%PDF'):
             for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
                 try:
@@ -475,72 +825,117 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
 
         # 2. Standard pypdf extraction
         try:
-            import io
             from pypdf import PdfReader
             reader = PdfReader(io.BytesIO(data))
             text_pages = []
-            for i, page in enumerate(reader.pages):
+            for page in reader.pages:
                 txt = page.extract_text() or ''
                 if txt.strip():
                     text_pages.append(txt.strip())
             full_text = "\n\n".join(text_pages).strip()
-            if len(full_text) > 20:
+            if len(full_text) > 10:
                 return full_text
         except Exception as e:
-            print(f"pypdf extraction error: {e}")
+            raise ValueError(f"PDF extraction error: {e}")
 
         raise ValueError("This PDF contains scanned images or non-extractable text. Please copy/paste the text directly or upload a text-based document.")
 
     if name.endswith('.docx'):
-        import zipfile
-        import io
-        import xml.etree.ElementTree as ET
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 xml_content = zf.read('word/document.xml')
                 tree = ET.fromstring(xml_content)
                 paragraphs = []
                 for p in tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
-                    texts = [node.text for node in p.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t') if node.text]
+                    texts = [
+                        node.text for node in p.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
+                        if node.text
+                    ]
                     if texts:
                         paragraphs.append("".join(texts))
                 return "\n\n".join(paragraphs)
         except Exception as e:
             raise ValueError(f"DOCX extraction failed: {e}")
 
-    return data.decode('utf-8', errors='ignore')
+    ext = os.path.splitext(filename)[1] or "Unknown"
+    raise ValueError(
+        f"Unsupported file format '{ext}'. LegalEase AI supports PDF (.pdf), Word (.docx), "
+        "Plain Text (.txt), and Markdown (.md)."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Request Models & API Endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    message: str
-    api_key: str | None = None
+    """
+    Validated request payload for conversational chat.
+    Note: Client-supplied api_key is transiently handled for demo purposes
+    and is never persisted or logged.
+    """
+    message: str = Field(..., min_length=1, max_length=4000, description="User question or prompt")
+    api_key: str | None = Field(default=None, max_length=200, description="Optional client-provided Gemini API key")
+
 
 @app.get('/health')
 def health():
+    """
+    Liveness and readiness health check probe.
+    """
     return {'status': 'healthy', 'service': 'LegalEase AI'}
 
+
 @app.post('/api/session')
-def create_session():
-    import uuid
+def create_session(request: Request):
+    """
+    Create a new private analysis session with unique session identifier.
+    Rate-limited to prevent session exhaustion.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip, "session")
+
     sid = str(uuid.uuid4())[:8]
-    sessions[sid] = {'chunks': [], 'history': [], 'file_names': []}
+    get_or_create_session(sid)
     return {'session_id': sid}
+
 
 @app.post('/api/session/{session_id}/document')
 @app.post('/api/session/{session_id}/upload')
-async def upload_document(session_id: str, file: UploadFile = File(...)):
-    s = sessions.get(session_id)
-    if not s:
-        s = sessions[session_id] = {'chunks': [], 'history': [], 'file_names': []}
+async def upload_document(session_id: str, request: Request, file: UploadFile = File(...)):
+    """
+    Upload and parse an agreement (PDF, DOCX, TXT, MD) into clauses and flags.
+    Enforces a strict 15 MB payload cap and per-client rate limit.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip, "upload")
 
+    s = get_or_create_session(session_id)
+
+    # 1. Enforce 15 MB file size limit
     content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"File size ({len(content)/(1024*1024):.1f} MB) exceeds the 15 MB limit."
+        )
+    if len(content) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The uploaded file is empty."
+        )
+
     filename = file.filename or 'document.txt'
     try:
         text = extract_text_from_file(filename, content)
     except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
 
     if not text.strip():
-        raise HTTPException(status_code=400, detail="The document contained no readable text.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The document contained no readable text."
+        )
 
     clauses = split_document_into_clauses(text, filename)
     s['chunks'].extend(clauses)
@@ -565,26 +960,40 @@ async def upload_document(session_id: str, file: UploadFile = File(...)):
         }
     }
 
-@app.post('/api/session/{session_id}/chat')
-def chat(session_id: str, request: ChatRequest):
-    s = sessions.get(session_id)
-    if not s:
-        s = sessions[session_id] = {'chunks': [], 'history': [], 'file_names': []}
 
-    llm_result = try_gemini_llm(request.message, s, request.api_key)
+@app.post('/api/session/{session_id}/chat')
+def chat(session_id: str, request_data: ChatRequest, request: Request):
+    """
+    Process a chat question against session documents or legal knowledge base.
+    Rate-limited per client identifier.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip, "chat")
+
+    s = get_or_create_session(session_id)
+
+    llm_result = try_gemini_llm(request_data.message, s, request_data.api_key)
     if llm_result:
-        s['history'].append({'role': 'user', 'content': request.message})
+        s['history'].append({'role': 'user', 'content': request_data.message})
         s['history'].append({'role': 'assistant', 'content': llm_result['answer']})
         return llm_result
 
-    result = generate_conversational_response(request.message, s)
-    s['history'].append({'role': 'user', 'content': request.message})
+    result = generate_conversational_response(request_data.message, s)
+    s['history'].append({'role': 'user', 'content': request_data.message})
     s['history'].append({'role': 'assistant', 'content': result['answer']})
     return result
 
+
 @app.post('/api/session/{session_id}/prepare-for-lawyer')
-def prepare(session_id: str):
-    s = sessions.get(session_id)
+def prepare(session_id: str, request: Request):
+    """
+    Generate an attorney-preparation checklist and high-priority legal questions
+    tailored to identified risk and obligation clauses in the document.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip, "chat")
+
+    s = get_or_create_session(session_id)
     if not s or not s.get('chunks'):
         return {
             'questions': [
@@ -602,9 +1011,13 @@ def prepare(session_id: str):
 
     questions = []
     for r in risks[:3]:
-        questions.append(f"Regarding '{r['ref']}': Can this penalty/liability be made mutual or capped at a specific dollar amount?")
+        questions.append(
+            f"Regarding '{r['ref']}': Can this penalty/liability be made mutual or capped at a specific dollar amount?"
+        )
     for o in obs[:2]:
-        questions.append(f"Regarding '{o['ref']}': Is this timeline or obligation standard under local governing law?")
+        questions.append(
+            f"Regarding '{o['ref']}': Is this timeline or obligation standard under local governing law?"
+        )
 
     if not questions:
         questions = [
@@ -614,8 +1027,7 @@ def prepare(session_id: str):
 
     return {'questions': questions}
 
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='127.0.0.1', port=8001)
-
-

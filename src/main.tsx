@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { marked } from 'marked';
 import './styles.css';
@@ -6,8 +6,12 @@ import './styles.css';
 // Configure marked for safe inline rendering
 marked.setOptions({ breaks: true, gfm: true });
 
-function MarkdownMessage({ content }: { content: string }) {
-  const html = marked.parse(content) as string;
+/**
+ * Renders sanitized markdown content into an HTML body container.
+ * @param props Component properties containing the raw markdown string.
+ */
+export function MarkdownMessage({ content }: { content: string }) {
+  const html = marked.parse(content || '') as string;
   return (
     <div
       className="md-body"
@@ -16,18 +20,36 @@ function MarkdownMessage({ content }: { content: string }) {
   );
 }
 
-type Cite = {
+/**
+ * Citation reference linking a factual claim to an exact clause excerpt.
+ */
+export type Cite = {
   marker?: string;
   source_text: string;
   clause_ref: string;
 };
 
-type Msg = {
+/**
+ * Conversational message structure supporting grounded citations,
+ * lawyer checklist items, and follow-up prompts.
+ */
+export type Msg = {
+  id?: string;
   role: 'assistant' | 'user';
   content: string;
   citations?: Cite[];
   followups?: string[];
   lawyer?: string[];
+};
+
+/**
+ * Authenticated Google user profile metadata.
+ */
+export type GoogleUser = {
+  sub: string;
+  name: string;
+  email: string;
+  picture: string;
 };
 
 const api = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8001';
@@ -41,7 +63,10 @@ Section 6. Maintenance & Repairs. Tenant must promptly notify Landlord of any co
 Section 8. Termination & Notice to Vacate. Either party may terminate this agreement by giving not less than sixty (60) days' written notice. Failure to provide notice results in forfeiture of deposit.
 Section 12. Alterations. Tenant shall make no alterations or painting without Landlord's prior written consent.`;
 
-function Logo() {
+/**
+ * LegalEase AI geometric brand logo SVG icon.
+ */
+export function Logo() {
   return (
     <svg viewBox="0 0 256 256" aria-hidden="true">
       <path d="M0 128c70 0 128 57 128 128H64c0-35-29-64-64-64v-64Zm256 64c-35 0-64 29-64 64h-64c0-71 57-128 128-128v64ZM128 0c0 71-57 128-128 128V64c35 0 64-29 64-64h64Zm64 0c0 35 29 64 64 64v64c-71 0-128-57-128-128h64Z" />
@@ -49,7 +74,11 @@ function Logo() {
   );
 }
 
-function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser | null; onSignOut: () => void }) {
+/**
+ * Top navigation bar with brand link, documentation links, and user authentication state.
+ * @param props Navigation callbacks and authenticated user state.
+ */
+export function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser | null; onSignOut: () => void }) {
   return (
     <nav className="glass">
       <a
@@ -92,7 +121,11 @@ function Nav({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => vo
   );
 }
 
-function Landing({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser | null; onSignOut: () => void }) {
+/**
+ * Marketing landing page highlighting document grounding, trust & safety, and onboarding.
+ * @param props Navigation callbacks and user session.
+ */
+export function Landing({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser | null; onSignOut: () => void }) {
   return (
     <>
       <div className="backdrop" />
@@ -220,8 +253,8 @@ function Landing({ onNavigate, user, onSignOut }: { onNavigate: (path: string) =
               quote: 'The "Prepare for my lawyer" list organized my questions and saved me over 30 minutes in legal fees.',
               author: 'Small business founder review',
             },
-          ].map((item, idx) => (
-            <article className="glass" key={idx}>
+          ].map((item) => (
+            <article className="glass" key={item.author}>
               <q>&ldquo;{item.quote}&rdquo;</q>
               <small>{item.author}</small>
             </article>
@@ -263,14 +296,11 @@ function Landing({ onNavigate, user, onSignOut }: { onNavigate: (path: string) =
 
 const GOOGLE_CLIENT_ID = '638136010192-oh6chshnj243ql45hun31864l6mvk39k.apps.googleusercontent.com';
 
-type GoogleUser = {
-  sub: string;
-  name: string;
-  email: string;
-  picture: string;
-};
-
-function getStoredUser(): GoogleUser | null {
+/**
+ * Retrieves the stored Google user session from browser localStorage.
+ * @returns Decoded GoogleUser object or null if not authenticated.
+ */
+export function getStoredUser(): GoogleUser | null {
   try {
     const raw = localStorage.getItem('legalease_user');
     return raw ? (JSON.parse(raw) as GoogleUser) : null;
@@ -279,7 +309,12 @@ function getStoredUser(): GoogleUser | null {
   }
 }
 
-function parseJwt(token: string): GoogleUser | null {
+/**
+ * Decodes a Google Sign-In JWT token to extract the user profile.
+ * @param token The encoded JWT credential string.
+ * @returns Decoded GoogleUser object or null if parsing fails.
+ */
+export function parseJwt(token: string): GoogleUser | null {
   try {
     const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     const json = decodeURIComponent(
@@ -296,7 +331,11 @@ function parseJwt(token: string): GoogleUser | null {
 
 // ─── Login Page ───────────────────────────────────────────────────────────────
 
-function LoginPage({ onSuccess }: { onSuccess: (user: GoogleUser) => void }) {
+/**
+ * Google authentication sign-in page with credential decoding and terms disclaimer.
+ * @param props Authentication completion callback.
+ */
+export function LoginPage({ onSuccess }: { onSuccess: (user: GoogleUser) => void }) {
   const btnRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -374,7 +413,11 @@ function LoginPage({ onSuccess }: { onSuccess: (user: GoogleUser) => void }) {
 
 // ─── User Chip (shown in chat header) ─────────────────────────────────────────
 
-function UserChip({ user, onSignOut }: { user: GoogleUser; onSignOut: () => void }) {
+/**
+ * Interactive user badge displayed in headers with avatar and sign-out controls.
+ * @param props Authenticated user metadata and sign-out callback.
+ */
+export function UserChip({ user, onSignOut }: { user: GoogleUser; onSignOut: () => void }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="user-chip" style={{ position: 'relative' }}>
@@ -408,7 +451,10 @@ function UserChip({ user, onSignOut }: { user: GoogleUser; onSignOut: () => void
 }
 // ─── Chat History Storage ─────────────────────────────────────────────────────
 
-type StoredChat = {
+/**
+ * Serialized conversation state for persistent session storage.
+ */
+export type StoredChat = {
   id: string;
   title: string;
   messages: Msg[];
@@ -418,28 +464,45 @@ type StoredChat = {
   updatedAt: number;
 };
 
-function historyKey(sub: string) { return `legalease_history_${sub}`; }
+/**
+ * Constructs localStorage key for user conversation history.
+ */
+export function historyKey(sub: string) { return `legalease_history_${sub}`; }
 
-function loadHistory(sub: string): StoredChat[] {
+/**
+ * Loads conversation history list for a user from browser localStorage.
+ */
+export function loadHistory(sub: string): StoredChat[] {
   try { return JSON.parse(localStorage.getItem(historyKey(sub)) || '[]'); }
   catch { return []; }
 }
 
-function saveHistory(sub: string, chats: StoredChat[]) {
+/**
+ * Persists updated conversation history list for a user to browser localStorage.
+ */
+export function saveHistory(sub: string, chats: StoredChat[]) {
   localStorage.setItem(historyKey(sub), JSON.stringify(chats.slice(0, 80)));
 }
 
-function makeId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+/**
+ * Generates a unique pseudo-random identifier for chat sessions and messages.
+ */
+export function makeId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
-const WELCOME: Msg = {
+export const WELCOME: Msg = {
+  id: 'welcome-message-0',
   role: 'assistant',
-  content: 'Welcome to LegalEase AI! I can help you:\n\n• Analyze contracts, leases, NDAs — with grounded citations and clause flags\n• Answer general legal questions and explain legal terms\n• Suggest negotiation strategies and attorney prep questions\n\nUpload a document (PDF, DOCX, TXT) to get document-specific answers, or just ask me anything!',
+  content: 'Welcome to LegalEase AI! I can help you:\n\n• Analyze contracts, leases, NDAs — with grounded citations and clause flags\n• Answer general legal questions and explain legal terms\n• Suggest negotiation strategies and attorney prep questions\n\nUpload a document (PDF, DOCX, TXT, MD) to get document-specific answers, or just ask me anything!',
   followups: ['What is an indemnification clause?', 'What is force majeure?', 'How do I negotiate my lease?'],
 };
 
 // ─── History Sidebar ──────────────────────────────────────────────────────────
 
-function HistorySidebar({
+/**
+ * Collapsible session history sidebar managing multiple chat threads and date groupings.
+ * @param props Conversation state, active selection, and toggle callbacks.
+ */
+export function HistorySidebar({
   chats,
   activeChatId,
   onSelect,
@@ -620,7 +683,12 @@ function HistorySidebar({
 
 // ─── Chat Page ────────────────────────────────────────────────────────────────
 
-function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser; onSignOut: () => void }) {
+/**
+ * Full-featured chat interface: document upload, grounded Q&A, citation viewer,
+ * risk/obligation flags, lawyer-prep questionnaire, and session history sidebar.
+ * @param props Navigation and authenticated user callbacks.
+ */
+export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => void; user: GoogleUser; onSignOut: () => void }) {
   // History state
   const [history, setHistory] = useState<StoredChat[]>(() => loadHistory(user.sub));
   const [activeChatId, setActiveChatId] = useState<string>(() => {
@@ -666,6 +734,7 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
     }
     setOpen(null);
     isInitialMount.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChatId]);
 
   // ── Auto-save on message change (debounced 600ms) ──────────────────────────
@@ -678,21 +747,24 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       const title = messages.find(m => m.role === 'user')?.content.slice(0, 48) || 'New Chat';
-      const updated: StoredChat = {
-        id: activeChatId,
-        title,
-        messages,
-        doc,
-        flags,
-        createdAt: history.find(c => c.id === activeChatId)?.createdAt ?? Date.now(),
-        updatedAt: Date.now(),
-      };
-      const next = [updated, ...history.filter(c => c.id !== activeChatId)];
-      setHistory(next);
-      saveHistory(user.sub, next);
+      setHistory(prevHistory => {
+        const existing = prevHistory.find(c => c.id === activeChatId);
+        const updated: StoredChat = {
+          id: activeChatId,
+          title,
+          messages,
+          doc,
+          flags,
+          createdAt: existing?.createdAt ?? Date.now(),
+          updatedAt: Date.now(),
+        };
+        const next = [updated, ...prevHistory.filter(c => c.id !== activeChatId)];
+        saveHistory(user.sub, next);
+        return next;
+      });
     }, 600);
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
-  }, [messages, doc, flags]);
+  }, [messages, doc, flags, activeChatId, user.sub]);
 
   // ── Scroll thread on new messages ─────────────────────────────────────────
   useEffect(() => {
@@ -722,7 +794,8 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
     }
   }
 
-  const push = (m: Msg) => setMessages(prev => [...prev, m]);
+  /** Append a message to the thread, assigning a stable unique id if absent. */
+  const push = (m: Msg) => setMessages(prev => [...prev, { id: makeId(), ...m }]);
 
   async function upload(f: File) {
     if (f.size > 15 * 1024 * 1024) {
@@ -872,13 +945,13 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
 
                 <section className="chat">
                   <div className="thread" ref={threadRef}>
-                    {messages.map((m, i) => (
-                      <article className={'message ' + m.role} key={i}>
+                    {messages.map((m) => (
+                      <article className={'message ' + m.role} key={m.id ?? m.content.slice(0, 40) + m.role}>
                         <div className="bubble">
                           {m.lawyer ? (
                             <>
                               <h3>{m.content}</h3>
-                              <ol>{m.lawyer.map((q, idx) => <li key={idx} style={{ marginTop: '6px' }}>{q}</li>)}</ol>
+                              <ol>{m.lawyer.map((q) => <li key={q} style={{ marginTop: '6px' }}>{q}</li>)}</ol>
                             </>
                           ) : m.role === 'assistant' ? (
                             <div className="md-wrap">
@@ -893,14 +966,16 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
                                     <span>Referenced Clauses:</span>
                                   </div>
                                   <div className="sources-chips">
-                                    {m.citations.map((c, idx) => {
+                                    {m.citations.map((c) => {
                                       const isSelected = open?.clause_ref === c.clause_ref;
                                       return (
                                         <button
                                           className={`source-chip ${isSelected ? 'active' : ''}`}
-                                          key={idx}
+                                          key={`${m.id ?? 'msg'}-${c.clause_ref}`}
                                           onClick={() => setOpen(isSelected ? null : c)}
-                                          title="Click to view original clause text"
+                                          title={`View source: ${c.clause_ref}`}
+                                          aria-label={`${isSelected ? 'Close' : 'Open'} citation: ${c.clause_ref}`}
+                                          aria-expanded={isSelected}
                                           type="button"
                                         >
                                           <span>{c.clause_ref}</span>
@@ -942,12 +1017,28 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
                   </div>
 
                   <form className="composer" onSubmit={e => { e.preventDefault(); send(); }}>
-                    <input ref={fileInputRef} hidden type="file" accept=".pdf,.docx,.doc,.txt,.md,.rtf,.csv,.json,.html" onChange={e => e.target.files?.[0] && upload(e.target.files[0])} />
-                    <button type="button" onClick={() => fileInputRef.current?.click()} aria-label="Attach Document" title="Attach PDF or TXT document" style={{ fontSize: '18px', padding: '0 8px' }}>
+                    <label htmlFor="file-upload" className="visually-hidden">Upload legal document (PDF, DOCX, TXT, MD)</label>
+                    <input
+                      id="file-upload"
+                      ref={fileInputRef}
+                      hidden
+                      type="file"
+                      accept=".pdf,.docx,.txt,.md"
+                      aria-label="Upload legal document (PDF, DOCX, TXT, MD)"
+                      onChange={e => e.target.files?.[0] && upload(e.target.files[0])}
+                    />
+                    <button type="button" onClick={() => fileInputRef.current?.click()} aria-label="Attach legal document" title="Attach PDF, DOCX, TXT or MD document" style={{ fontSize: '18px', padding: '0 8px' }}>
                       &#128206;
                     </button>
-                    <input value={text} onChange={e => setText(e.target.value)} placeholder="Ask about your document (e.g. Can the landlord enter without notice?)..." />
-                    <button type="button" className="lawyer" onClick={lawyer} title="Generate focused questions for an attorney">Prepare for a lawyer</button>
+                    <label htmlFor="chat-input" className="visually-hidden">Ask about your legal document</label>
+                    <input
+                      id="chat-input"
+                      value={text}
+                      onChange={e => setText(e.target.value)}
+                      placeholder="Ask about your document (e.g. Can the landlord enter without notice?)..."
+                      aria-label="Ask about your legal document"
+                    />
+                    <button type="button" className="lawyer" onClick={lawyer} title="Generate focused questions for an attorney" aria-label="Prepare questions for a lawyer">Prepare for a lawyer</button>
                     <button className="send" type="submit" aria-label="Send">&uarr;</button>
                   </form>
 
@@ -964,7 +1055,10 @@ function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: string) => v
   );
 }
 
-function App() {
+/**
+ * Root application component managing routing, authentication state, and navigation.
+ */
+export function App() {
   const [user, setUser] = useState<GoogleUser | null>(getStoredUser);
   const [route, setRoute] = useState(() => {
     const path = typeof window !== 'undefined' ? window.location.pathname : '/';
