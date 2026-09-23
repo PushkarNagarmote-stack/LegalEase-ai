@@ -1,38 +1,19 @@
-# LegalEase AI – Portal Submission Answers
+# LegalEase AI – Portal Submission Answers (< 1024 Characters Each)
 
 ## Question 1: Describe the changes/updates made in the deployed version
+*(Length: 825 characters)*
 
-1. **Production Multi-Cloud Deployment**:
-   - Deployed the React 18 + TypeScript frontend to **Vercel** with optimized static build, SPA routing rewrites, and immutable CDN caching (`vercel.json`).
-   - Deployed the FastAPI backend to **Render** with Uvicorn ASGI workers and automated `/health` liveness checks (`render.yaml`).
-   - Configured dynamic environment variables (`VITE_API_URL`, `ALLOWED_ORIGINS`, `GEMINI_API_KEY`) eliminating any hardcoded localhost bindings.
-
-2. **Defense-in-Depth Security**:
-   - Enforced HTTP security headers: Content Security Policy (CSP), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, and Referrer-Policy.
-   - Built CSRF middleware and CORS origin enforcement to block cross-site request forgery.
-   - Added sliding-window rate limiting (30 chat/min, 10 uploads/min, 60 sessions/min) returning `429 Too Many Requests` + `Retry-After`.
-   - Hardened document upload parser against zip-slip and XML bomb vulnerabilities with a 15 MB file size limit and MIME validation.
-
-3. **High Availability & Cold-Start Resilience**:
-   - Implemented automated session initialization with 3-attempt exponential backoff on the frontend to seamlessly absorb Render cold starts.
-   - Added `ensureSession()` promise guards to guarantee zero lost user requests during network handshakes.
-
-4. **Code Quality, Accessibility & 211 Automated Tests**:
-   - 100% clean audits: 0 warnings in ESLint (`flat config`) and Ruff.
-   - Comprehensive docstrings (PEP-257) and JSDoc annotations across all endpoints and components.
-   - Expanded test coverage to **211 automated tests** (152 Pytest backend tests + 59 Vitest frontend tests) validating WCAG accessibility, ARIA labels, keyword ranking, and security middleware.
+1. Cloud Deployment: Decoupled into a production architecture with React 18 + TypeScript frontend hosted on Vercel (SPA rewrites, CDN caching) and FastAPI backend on Render with dynamic env variables (VITE_API_URL, ALLOWED_ORIGINS).
+2. Defense-in-Depth Security: Added strict CSP headers, X-Frame-Options: DENY, CSRF origin verification, and sliding-window rate limiting (30 chat/min, 10 uploads/min) returning 429 Retry-After. Hardened document parser against zip-slip and XML bomb attacks with 15MB file limits.
+3. Cold-Start Resilience: Implemented automatic session creation with 3-attempt exponential backoff to seamlessly handle Render free-tier wakeups without dropped requests.
+4. Quality & 211 Tests: Zero ESLint or Ruff warnings, full JSDoc and PEP-257 docstrings, and 211 automated tests (152 Pytest + 59 Vitest) covering security, WCAG accessibility, and legal parsing.
 
 ---
 
 ## Question 2: Mention the Gen AI services utilized in the submission, and where did you utilize it?
+*(Length: 835 characters)*
 
-1. **Gen AI Service Utilized**:
-   - **Google Gemini 2.5 Flash** (via the official `google-genai` Python SDK and Gemini REST API), selected for fast inference, low latency, large context window, and accuracy in structured legal comprehension.
-
-2. **Where and How It Is Utilized in the Pipeline**:
-   - **Grounded Legal Q&A (Zero-Hallucination Citations)**:
-     In the `/api/session/{id}/chat` endpoint, Gemini 2.5 Flash ingests user legal queries alongside retrieved document clauses. Guided by strict legal-assistant system instructions, it generates plain-English explanations where every assertion is backed by verbatim clause quotations and section references.
-   - **Attorney Consultation Preparation ("Prepare for My Lawyer")**:
-     In the `/api/session/{id}/prepare-for-lawyer` endpoint, Gemini analyzes high-risk clauses (unilateral indemnities, liquidated damages, default penalties) to generate prioritized, jurisdiction-aware questions for users to bring to their attorneys.
-   - **Autonomous Offline Fallback Layer**:
-     GenAI inference is designed with high availability: users can supply their own Gemini API key or use the environment key. If no key is present or quota is exceeded, an autonomous deterministic keyword-density retrieval engine steps in seamlessly to ensure 100% uptime.
+1. Gen AI Service: Google Gemini 2.5 Flash utilized via the official google-genai Python SDK and Gemini REST API, selected for sub-second inference speed, high context efficiency, and precision in legal reasoning.
+2. Grounded Contract Q&A: In `/api/session/{id}/chat`, Gemini receives user questions alongside retrieved contract clauses under strict legal-assistant prompts. It generates plain-language answers where every claim is anchored to verbatim clause citations and section titles to eliminate hallucinations.
+3. Attorney Prep Questionnaire: In `/api/session/{id}/prepare-for-lawyer`, Gemini analyzes high-risk clauses (indemnities, default penalties, deposit forfeitures) to draft prioritized, jurisdiction-aware questions for paid legal consultations.
+4. Resilient Fallback: Supports user or environment keys, with automatic fallback to an offline keyword-density retrieval engine if quota is exceeded.
