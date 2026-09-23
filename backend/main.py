@@ -8,11 +8,7 @@ import zipfile
 from collections import Counter, defaultdict
 from typing import Any, Callable
 
-try:
-    import defusedxml.ElementTree as ET
-except ImportError:
-    import xml.etree.ElementTree as ET  # nosec B405
-
+import defusedxml.ElementTree as ET
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -359,22 +355,14 @@ def split_document_into_clauses(text: str, filename: str) -> list[dict[str, Any]
         else:
             heading = re.sub(r'^[#*\s]+', '', first_line)[:45].strip()
         ref = f"{heading}" if heading else f"Section {i}"
-        words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', clean)]
         clauses.append({
             'ref': ref,
             'text': clean,
             'heading': heading.lower(),
-            'type': classify_clause(clean),
-            'word_counts': dict(Counter(words))
+            'type': classify_clause(clean)
         })
 
-    return clauses or [{
-        'ref': f'{clean_fname} - Section 1',
-        'text': text,
-        'heading': 'agreement',
-        'type': 'info',
-        'word_counts': dict(Counter(w.lower() for w in re.findall(r'[a-zA-Z0-9]+', text)))
-    }]
+    return clauses or [{'ref': f'{clean_fname} - Section 1', 'text': text, 'heading': 'agreement', 'type': 'info'}]
 
 
 def classify_clause(text: str) -> str:
@@ -403,7 +391,7 @@ def classify_clause(text: str) -> str:
 def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, Any]]:
     """
     Retrieve top matching clauses from the session using keyword density,
-    synonym expansion, and heading affinity. Optimized with precomputed token counts.
+    synonym expansion, and heading affinity.
     """
     clauses = session.get('chunks', [])
     if not clauses:
@@ -418,11 +406,8 @@ def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, A
 
     scored = []
     for c in clauses:
-        c_counts = c.get('word_counts')
-        if c_counts is None:
-            c_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', c['text'])]
-            c_counts = dict(Counter(c_words))
-            c['word_counts'] = c_counts
+        c_words = [w.lower() for w in re.findall(r'[a-zA-Z0-9]+', c['text'])]
+        c_counts = Counter(c_words)
 
         score = 0.0
         for qw in expanded_q:
@@ -862,7 +847,7 @@ def extract_text_from_file(filename: str, data: bytes) -> str:
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as zf:
                 xml_content = zf.read('word/document.xml')
-                tree = ET.fromstring(xml_content)  # nosec B314
+                tree = ET.fromstring(xml_content)
                 paragraphs = []
                 for p in tree.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
                     texts = [
