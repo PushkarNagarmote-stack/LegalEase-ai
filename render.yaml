@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: legalease-ai-backend
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ALLOWED_ORIGINS
+        sync: false          # Set this in Render dashboard to your Vercel URL
+      - key: GEMINI_API_KEY
+        sync: false          # Optional: set in Render dashboard for server-side Gemini
+    healthCheckPath: /health

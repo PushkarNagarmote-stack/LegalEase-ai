@@ -952,6 +952,31 @@ export function Chat({ onNavigate, user, onSignOut }: { onNavigate: (path: strin
                             <>
                               <h3>{m.content}</h3>
                               <ol>{m.lawyer.map((q) => <li key={q} style={{ marginTop: '6px' }}>{q}</li>)}</ol>
+                              <button
+                                type="button"
+                                style={{
+                                  marginTop: '12px',
+                                  padding: '6px 12px',
+                                  background: 'rgba(201,168,76,0.15)',
+                                  border: '1px solid rgba(201,168,76,0.4)',
+                                  borderRadius: '6px',
+                                  color: '#f0d38d',
+                                  cursor: 'pointer',
+                                  fontSize: '0.8rem',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                }}
+                                onClick={() => {
+                                  const textToCopy = `Questions to Bring to Your Lawyer:\n` + (m.lawyer || []).map((q, i) => `${i + 1}. ${q}`).join('\n');
+                                  if (navigator.clipboard?.writeText) {
+                                    navigator.clipboard.writeText(textToCopy);
+                                  }
+                                }}
+                                title="Copy all questions to clipboard"
+                              >
+                                📋 Copy Questions
+                              </button>
                             </>
                           ) : m.role === 'assistant' ? (
                             <div className="md-wrap">

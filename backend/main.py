@@ -7,11 +7,11 @@ import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -47,7 +47,7 @@ app.add_middleware(
 
 # 2. Security Headers Middleware
 @app.middleware("http")
-async def add_security_headers(request: Request, call_next):
+async def add_security_headers(request: Request, call_next: Callable[[Request], Any]) -> Response:
     """
     Inject comprehensive defense-in-depth security headers on all responses:
     - X-Content-Type-Options: Prevents MIME-type sniffing
@@ -68,7 +68,7 @@ async def add_security_headers(request: Request, call_next):
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
         "font-src 'self' https://fonts.gstatic.com; "
         "img-src 'self' data: https:; "
-        "connect-src 'self' http://localhost:8001 http://127.0.0.1:8001 https://accounts.google.com;"
+        "connect-src 'self' http://localhost:8001 http://127.0.0.1:8001 https://*.onrender.com https://*.vercel.app https://accounts.google.com;"
     )
     if request.url.scheme == "https":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
@@ -77,7 +77,7 @@ async def add_security_headers(request: Request, call_next):
 
 # 3. CSRF & Origin Verification Middleware
 @app.middleware("http")
-async def verify_csrf_and_origin(request: Request, call_next):
+async def verify_csrf_and_origin(request: Request, call_next: Callable[[Request], Any]) -> Response:
     """
     Verify Origin and Referer headers on state-changing HTTP methods
     (POST, PUT, DELETE) when dispatched from browser environments.
@@ -110,7 +110,7 @@ RATE_LIMITS = {
 _rate_limit_records: dict[str, list[float]] = defaultdict(list)
 
 
-def check_rate_limit(client_id: str, action: str):
+def check_rate_limit(client_id: str, action: str) -> None:
     """
     Enforce a sliding-window rate limit for a client identifier and action.
     Raises HTTPException(429) with Retry-After header when rate exceeded.
@@ -427,7 +427,7 @@ def retrieve_clauses(session: dict[str, Any], question: str) -> list[dict[str, A
 _GENAI_CLIENTS: dict[str, Any] = {}
 
 
-def get_genai_client(api_key: str):
+def get_genai_client(api_key: str) -> Any:
     """
     Retrieve or cache a Google GenAI Client instance to avoid redundant initialization.
     """
@@ -879,7 +879,7 @@ class ChatRequest(BaseModel):
 
 
 @app.get('/health')
-def health():
+def health() -> dict[str, str]:
     """
     Liveness and readiness health check probe.
     """
@@ -887,7 +887,7 @@ def health():
 
 
 @app.post('/api/session')
-def create_session(request: Request):
+def create_session(request: Request) -> dict[str, str]:
     """
     Create a new private analysis session with unique session identifier.
     Rate-limited to prevent session exhaustion.
@@ -902,7 +902,7 @@ def create_session(request: Request):
 
 @app.post('/api/session/{session_id}/document')
 @app.post('/api/session/{session_id}/upload')
-async def upload_document(session_id: str, request: Request, file: UploadFile = File(...)):
+async def upload_document(session_id: str, request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
     """
     Upload and parse an agreement (PDF, DOCX, TXT, MD) into clauses and flags.
     Enforces a strict 15 MB payload cap and per-client rate limit.
@@ -962,7 +962,7 @@ async def upload_document(session_id: str, request: Request, file: UploadFile = 
 
 
 @app.post('/api/session/{session_id}/chat')
-def chat(session_id: str, request_data: ChatRequest, request: Request):
+def chat(session_id: str, request_data: ChatRequest, request: Request) -> dict[str, Any]:
     """
     Process a chat question against session documents or legal knowledge base.
     Rate-limited per client identifier.
@@ -985,7 +985,7 @@ def chat(session_id: str, request_data: ChatRequest, request: Request):
 
 
 @app.post('/api/session/{session_id}/prepare-for-lawyer')
-def prepare(session_id: str, request: Request):
+def prepare(session_id: str, request: Request) -> dict[str, Any]:
     """
     Generate an attorney-preparation checklist and high-priority legal questions
     tailored to identified risk and obligation clauses in the document.
