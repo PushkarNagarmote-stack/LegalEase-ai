@@ -66,8 +66,8 @@ graph TD
 
 ## 🛡️ Security & Defense-in-Depth
 
-- **HTTP Security Headers**: Injected via middleware on every response:
-  - `Content-Security-Policy`: Restricts resource scripts and connect endpoints.
+- **HTTP Security Headers & CSP**: Injected via middleware on every response:
+  - `Content-Security-Policy`: Restricts resource scripts, denies framing, and whitelists authorized connect endpoints.
   - `X-Content-Type-Options: nosniff`: Prevents MIME-type confusion attacks.
   - `X-Frame-Options: DENY`: Prevents clickjacking.
   - `Referrer-Policy: strict-origin-when-cross-origin`: Shields sensitive referrers.
@@ -75,7 +75,9 @@ graph TD
   - `Strict-Transport-Security`: Enforces TLS when accessed over HTTPS.
 - **Strict CORS & CSRF Verification**: Disallows wildcard origins with credentials (`allow_origins=["*"]`). State-changing methods (`POST`, `PUT`, `DELETE`) verify origin and referer against an authorized whitelist.
 - **Sliding-Window Rate Limiting**: Enforces client request quotas (30 chat msgs/min, 10 uploads/min, 60 sessions/min) and returns `HTTP 429` with standard `Retry-After` headers.
-- **Input Sanitization & Safe Reflection**: User inquiries reflected in conversational fallbacks are HTML-escaped (`html.escape`) to prevent Cross-Site Scripting (XSS).
+- **XXE Defense (`defusedxml`)**: Ingested `.docx` XML payloads are parsed exclusively with `defusedxml` to block XML external entity expansion and Billion Laughs vulnerabilities.
+- **XSS Sanitization (`DOMPurify`)**: Frontend Markdown and dynamic text rendering are sanitized through DOMPurify prior to injection.
+- **Bandit Security Audited**: Zero high- or medium-severity security findings across all backend modules.
 - **Injection Resilience**: Hardened against SQL injection strings, null-byte payloads (`\x00`), and path traversal attempts.
 - **Payload Clamping**: 15 MB file upload ceiling enforced before reading into memory; 5,000-character chat input cap enforced via Pydantic schema validation.
 
@@ -177,7 +179,10 @@ npm test
 npm run lint
 
 # Run Ruff Python linter (0 errors, 0 warnings)
-python -m ruff check backend tests
+python -m ruff check backend/ tests/
+
+# Run Bandit AST security scan (0 vulnerabilities)
+python -m bandit -r backend/ -ll -q
 
 # Run TypeScript type check (0 errors)
 npx tsc --noEmit
@@ -185,6 +190,29 @@ npx tsc --noEmit
 # Production frontend bundle build
 npm run build
 ```
+
+---
+
+## 🌐 Cloud Deployment Architecture
+
+The application is architected for decoupled cloud hosting with zero vendor lock-in:
+
+### Backend Deployment (Render Web Service)
+- **Configuration**: Managed via declarative [`render.yaml`](render.yaml).
+- **Runtime**: Python 3.11+ using Uvicorn ASGI server.
+- **Build Command**: `pip install -r backend/requirements.txt`
+- **Start Command**: `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`
+- **Health Probe**: `/health` monitored automatically for zero-downtime restarts.
+- **Environment Variables**:
+  - `ALLOWED_ORIGINS`: Comma-separated allowed frontend domain(s) (e.g. `https://legal-ease-ai-one.vercel.app`).
+  - `GEMINI_API_KEY`: *(Optional)* Google Gemini API key for cloud inference.
+
+### Frontend Deployment (Vercel SPA)
+- **Configuration**: Managed via [`vercel.json`](vercel.json) with SPA fallback rewrites and cache headers.
+- **Framework**: Vite + React 18 with TypeScript.
+- **Build Command**: `npm run build` (output directory: `dist`)
+- **Environment Variables**:
+  - `VITE_API_URL`: Backend URL (e.g. `https://legalease-ai-cbb7.onrender.com`).
 
 ---
 
