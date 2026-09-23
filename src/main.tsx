@@ -1,21 +1,39 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import './styles.css';
 
 // Configure marked for safe inline rendering
 marked.setOptions({ breaks: true, gfm: true });
 
+// DOMPurify allowlisted tags and attributes for sanitizing markdown-rendered HTML.
+const ALLOWED_MD_TAGS = [
+  'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's', 'del', 'ins',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
+  'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+  'hr', 'span', 'div',
+];
+const ALLOWED_MD_ATTR = ['href', 'title', 'class', 'id', 'target', 'rel'];
+
 /**
- * Renders sanitized markdown content into an HTML body container.
+ * Renders DOMPurify-sanitized markdown content into an HTML body container.
+ * All HTML produced by marked.parse is passed through DOMPurify before injection
+ * to prevent Cross-Site Scripting (XSS) attacks.
  * @param props Component properties containing the raw markdown string.
  */
 export function MarkdownMessage({ content }: { content: string }) {
-  const html = marked.parse(content || '') as string;
+  const rawHtml = marked.parse(content || '') as string;
+  const safeHtml = DOMPurify.sanitize(rawHtml, {
+    ALLOWED_TAGS: ALLOWED_MD_TAGS,
+    ALLOWED_ATTR: ALLOWED_MD_ATTR,
+    FORCE_BODY: true,
+  });
   return (
     <div
       className="md-body"
-      dangerouslySetInnerHTML={{ __html: html }}
+      dangerouslySetInnerHTML={{ __html: safeHtml }}
     />
   );
 }

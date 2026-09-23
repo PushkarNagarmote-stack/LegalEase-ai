@@ -16,12 +16,14 @@
   "type": "commonjs",
   "dependencies": {
     "@types/marked": "^5.0.2",
+    "dompurify": "^3.2.4",
     "marked": "^18.0.14",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/dompurify": "^3.0.5",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
