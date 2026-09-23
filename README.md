@@ -4,11 +4,16 @@
 > *Built for Hack2skill Virtual PromptWars*
 
 [![Tests](https://img.shields.io/badge/tests-211%20passing-brightgreen.svg)](#test-coverage-matrix)
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-Vercel-black?logo=vercel)](https://legal-ease-ai-one.vercel.app)
+[![API Status](https://img.shields.io/badge/Backend-Render-46E3B7?logo=render)](https://legalease-ai-cbb7.onrender.com/health)
 [![Backend](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com)
 [![Frontend](https://img.shields.io/badge/React-18.3+-61DAFB.svg)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9+-3178C6.svg)](https://www.typescriptlang.org)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg)](https://www.python.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> 🌐 **Live Application**: [legal-ease-ai-one.vercel.app](https://legal-ease-ai-one.vercel.app)  
+> ⚡ **Live API**: [legalease-ai-cbb7.onrender.com](https://legalease-ai-cbb7.onrender.com/health)
 
 ---
 
